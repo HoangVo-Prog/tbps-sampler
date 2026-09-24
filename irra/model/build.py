@@ -97,6 +97,11 @@ class IRRA(nn.Module):
         # i_feats = image_feats.float() # for CLIP ResNet visual model
         t_feats = text_feats[torch.arange(text_feats.shape[0]), caption_ids.argmax(dim=-1)].float()
 
+        if self.training and 'image_ids' in batch:
+            ret['sampler_metrics'] = objectives.compute_sampler_metrics(
+                i_feats, t_feats, batch['pids'], batch['image_ids']
+            )
+
         logit_scale = self.logit_scale
         ret.update({'temperature': 1 / logit_scale})
 

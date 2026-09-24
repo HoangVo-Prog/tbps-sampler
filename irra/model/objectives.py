@@ -3,6 +3,46 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+@torch.no_grad()
+def compute_sampler_metrics(image_features, text_features, pid, image_ids):
+    """Measure identity positives, image duplicates, and in-batch negatives."""
+    pid = pid.reshape(-1)
+    image_ids = image_ids.reshape(-1)
+    batch_size = pid.numel()
+
+    same_pid = pid[:, None].eq(pid[None, :])
+    off_diagonal = ~torch.eye(batch_size, dtype=torch.bool, device=pid.device)
+    positive = same_pid & off_diagonal
+    same_image = image_ids[:, None].eq(image_ids[None, :])
+
+    image_norm = F.normalize(image_features.float(), dim=1)
+    text_norm = F.normalize(text_features.float(), dim=1)
+    similarities = text_norm @ image_norm.t()
+    negative = ~same_pid
+    row_has_negative = negative.any(dim=1)
+    column_has_negative = negative.any(dim=0)
+    row_hardest = similarities.masked_fill(~negative, float('-inf')).max(dim=1).values
+    column_hardest = similarities.masked_fill(~negative, float('-inf')).max(dim=0).values
+    hard_scores = torch.cat((row_hardest[row_has_negative],
+                             column_hardest[column_has_negative]))
+
+    positive_pair_count = torch.triu(positive, diagonal=1).sum()
+    same_image_pair_count = torch.triu(positive & same_image, diagonal=1).sum()
+    same_image_fraction = (
+        same_image_pair_count.float() / positive_pair_count.clamp(min=1)
+    )
+    return {
+        'unique_pids': image_features.new_tensor(float(pid.unique().numel())),
+        'positive_pairs': positive_pair_count.float(),
+        'positive_anchor_fraction': positive.any(dim=1).float().mean(),
+        'same_image_positive_fraction': same_image_fraction,
+        'hardest_negative_similarity': (
+            hard_scores.mean() if hard_scores.numel()
+            else image_features.new_tensor(0.0)
+        ),
+    }
+
+
 def compute_sdm(image_fetures, text_fetures, pid, logit_scale, image_id=None, factor=0.3, epsilon=1e-8):
     """
     Similarity Distribution Matching

@@ -2,7 +2,11 @@ import logging
 import torch
 import torchvision.transforms as T
 from torch.utils.data import DataLoader
-from datasets.sampler import RandomIdentitySampler
+from datasets.sampler import (
+    RandomIdentityImageSampler,
+    RandomIdentitySampler,
+    RandomPositiveMixedSampler,
+)
 from datasets.sampler_ddp import RandomIdentitySampler_DDP
 from torch.utils.data.distributed import DistributedSampler
 
@@ -121,8 +125,42 @@ def build_dataloader(args, tranforms=None):
                                       shuffle=True,
                                       num_workers=num_workers,
                                       collate_fn=collate)
+        elif args.sampler == 'identity_image':
+            if args.distributed:
+                raise NotImplementedError(
+                    'identity_image sampler is currently single-GPU only'
+                )
+            logger.info(
+                f'using distinct-image identity sampler: batch_size: {args.batch_size}, '
+                f'id: {args.batch_size // args.num_instance}, '
+                f'instance: {args.num_instance}'
+            )
+            train_loader = DataLoader(
+                train_set,
+                batch_size=args.batch_size,
+                sampler=RandomIdentityImageSampler(
+                    dataset.train, args.batch_size, args.num_instance
+                ),
+                num_workers=num_workers,
+                collate_fn=collate,
+            )
+        elif args.sampler == 'mixed':
+            if args.distributed:
+                raise NotImplementedError(
+                    'mixed sampler is currently single-GPU only'
+                )
+            train_loader = DataLoader(
+                train_set,
+                batch_size=args.batch_size,
+                sampler=RandomPositiveMixedSampler(
+                    dataset.train, args.batch_size,
+                    args.positive_pairs_per_batch
+                ),
+                num_workers=num_workers,
+                collate_fn=collate,
+            )
         else:
-            logger.error('unsupported sampler! expected softmax or triplet but got {}'.format(args.sampler))
+            logger.error('unsupported sampler! expected identity, identity_image, mixed, or random but got {}'.format(args.sampler))
 
         # use test set as validate set
         ds = dataset.val if args.val_dataset == 'val' else dataset.test

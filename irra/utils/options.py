@@ -5,6 +5,8 @@ def get_args():
     parser = argparse.ArgumentParser(description="IRRA Args")
     ######################## general settings ########################
     parser.add_argument("--local_rank", default=0, type=int)
+    parser.add_argument("--seed", default=1, type=int,
+                        help="random seed for reproducible sampler/model runs")
     parser.add_argument("--name", default="baseline", help="experiment name to save")
     parser.add_argument("--output_dir", default="logs")
     parser.add_argument("--log_period", default=100)
@@ -51,6 +53,8 @@ def get_args():
     
     ######################## scheduler ########################
     parser.add_argument("--num_epoch", type=int, default=60)
+    parser.add_argument("--steps_per_epoch", type=int, default=0,
+                        help="cap each epoch to this many optimizer updates; 0 uses the full loader")
     parser.add_argument("--lr-total-epochs", type=int, default=None,
                         help="total epoch horizon used by the learning-rate scheduler")
     parser.add_argument("--milestones", type=int, nargs='+', default=(20, 50))
@@ -64,8 +68,11 @@ def get_args():
 
     ######################## dataset ########################
     parser.add_argument("--dataset_name", default="CUHK-PEDES", help="[CUHK-PEDES, ICFG-PEDES, RSTPReid]")
-    parser.add_argument("--sampler", default="random", help="choose sampler from [idtentity, random]")
+    parser.add_argument("--sampler", default="random",
+                        help="choose sampler from [identity, identity_image, mixed, random]")
     parser.add_argument("--num_instance", type=int, default=4)
+    parser.add_argument("--positive_pairs_per_batch", type=int, default=4,
+                        help="same-PID pairs per batch when sampler=mixed")
     parser.add_argument("--root_dir", default="./data")
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--test_batch_size", type=int, default=512)

@@ -36,7 +36,16 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
         "mlm_loss": AverageMeter(),
         "img_acc": AverageMeter(),
         "txt_acc": AverageMeter(),
-        "mlm_acc": AverageMeter()
+        "mlm_acc": AverageMeter(),
+        "unique_pids": AverageMeter(),
+        "positive_pairs": AverageMeter(),
+        "positive_anchor_fraction": AverageMeter(),
+        "same_image_positive_fraction": AverageMeter(),
+        "hardest_negative_similarity": AverageMeter(),
+    }
+    sampler_metric_names = {
+        "unique_pids", "positive_pairs", "positive_anchor_fraction",
+        "same_image_positive_fraction", "hardest_negative_similarity",
     }
 
     tb_writer = SummaryWriter(log_dir=args.output_dir)
@@ -51,6 +60,8 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
         model.train()
 
         for n_iter, batch in enumerate(train_loader):
+            if args.steps_per_epoch > 0 and n_iter >= args.steps_per_epoch:
+                break
             batch = {k: v.to(device) for k, v in batch.items()}
 
             ret = model(batch)
@@ -67,6 +78,9 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
             meters['txt_acc'].update(meter_scalar(ret.get('txt_acc', 0)), batch_size)
             meters['mlm_acc'].update(meter_scalar(ret.get('mlm_acc', 0)), 1)
 
+            for metric_name, metric_value in ret.get('sampler_metrics', {}).items():
+                meters[metric_name].update(meter_scalar(metric_value), 1)
+
             optimizer.zero_grad()
             total_loss.backward()
             optimizer.step()
@@ -76,7 +90,7 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
                 info_str = f"Epoch[{epoch}] Iteration[{n_iter + 1}/{len(train_loader)}]"
                 # log loss and acc info
                 for k, v in meters.items():
-                    if v.avg > 0:
+                    if v.avg > 0 or k in sampler_metric_names:
                         info_str += f", {k}: {v.avg:.4f}"
                 info_str += f", Base Lr: {scheduler.get_lr()[0]:.2e}"
                 logger.info(info_str)
@@ -84,7 +98,7 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
         tb_writer.add_scalar('lr', scheduler.get_lr()[0], epoch)
         tb_writer.add_scalar('temperature', meter_scalar(ret['temperature']), epoch)
         for k, v in meters.items():
-            if v.avg > 0:
+            if v.avg > 0 or k in sampler_metric_names:
                 tb_writer.add_scalar(k, v.avg, epoch)
 
 
