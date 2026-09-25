@@ -18,6 +18,7 @@ from datasets.sampler import (
     RandomIdentityImageSampler,
     RandomIdentitySampler,
     RandomPositiveMixedSampler,
+    BalancedMixedSampler,
 )
 
 
@@ -177,6 +178,7 @@ def main():
     configs.extend(("identity", k) for k in args.num_instances)
     configs.extend(("identity_image", k) for k in args.num_instances)
     configs.append(("mixed", args.positive_pairs_per_batch))
+    configs.append(("balanced_mixed", args.positive_pairs_per_batch))
     for sampler_name, num_instances in configs:
         if sampler_name == "identity_image":
             random.seed(args.seed)
@@ -185,6 +187,13 @@ def main():
         elif sampler_name == "mixed":
             random.seed(args.seed)
             sampler = RandomPositiveMixedSampler(
+                rows, args.batch_size, args.positive_pairs_per_batch
+            )
+            indices, reported_length = list(iter(sampler)), len(sampler)
+        elif sampler_name == "balanced_mixed":
+            random.seed(args.seed)
+            np.random.seed(args.seed)
+            sampler = BalancedMixedSampler(
                 rows, args.batch_size, args.positive_pairs_per_batch
             )
             indices, reported_length = list(iter(sampler)), len(sampler)

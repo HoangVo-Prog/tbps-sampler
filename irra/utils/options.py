@@ -69,10 +69,12 @@ def get_args():
     ######################## dataset ########################
     parser.add_argument("--dataset_name", default="CUHK-PEDES", help="[CUHK-PEDES, ICFG-PEDES, RSTPReid]")
     parser.add_argument("--sampler", default="random",
-                        help="choose sampler from [identity, identity_image, mixed, random]")
+                        help="choose sampler from [identity, identity_image, mixed, balanced_mixed, random]")
     parser.add_argument("--num_instance", type=int, default=4)
     parser.add_argument("--positive_pairs_per_batch", type=int, default=4,
                         help="same-PID pairs per batch when sampler=mixed")
+    parser.add_argument("--rarity_power", type=float, default=0.5,
+                        help="inverse-frequency power for balanced_mixed")
     parser.add_argument("--root_dir", default="./data")
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--test_batch_size", type=int, default=512)

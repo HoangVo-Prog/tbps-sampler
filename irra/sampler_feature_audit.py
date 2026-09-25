@@ -20,6 +20,7 @@ from datasets.sampler import (
     RandomIdentityImageSampler,
     RandomIdentitySampler,
     RandomPositiveMixedSampler,
+    BalancedMixedSampler,
 )
 from model import build_model
 from utils.checkpoint import Checkpointer
@@ -103,6 +104,8 @@ def sample_indices(rows, sampler_name, batch_size, k, mixed_pairs, seed):
         sampler = RandomIdentitySampler(rows, batch_size, k)
     elif sampler_name == "identity_image":
         sampler = RandomIdentityImageSampler(rows, batch_size, k)
+    elif sampler_name == "balanced_mixed":
+        sampler = BalancedMixedSampler(rows, batch_size, mixed_pairs)
     else:
         sampler = RandomPositiveMixedSampler(rows, batch_size, mixed_pairs)
     return list(iter(sampler))
@@ -191,7 +194,10 @@ def main():
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
 
-    config = load_train_configs(args.model_run)
+    model_run = Path(args.model_run)
+    config_path = model_run / "configs.yaml" if model_run.is_dir() else model_run
+    checkpoint_dir = model_run if model_run.is_dir() else model_run.parent
+    config = load_train_configs(str(config_path))
     config.root_dir = args.root_dir
     config.dataset_name = args.dataset_name
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
@@ -204,7 +210,7 @@ def main():
     model = build_model(config, num_classes=len(dataset.train_id_container)).to(device)
     checkpoint_path = Path(args.checkpoint)
     if not checkpoint_path.is_absolute():
-        checkpoint_path = Path(args.model_run) / checkpoint_path
+        checkpoint_path = checkpoint_dir / checkpoint_path
     Checkpointer(model).load(str(checkpoint_path))
     model.eval()
 
@@ -231,6 +237,7 @@ def main():
     configurations.extend(("identity", k) for k in args.num_instances)
     configurations.extend(("identity_image", k) for k in args.num_instances)
     configurations.extend(("mixed", args.positive_pairs_per_batch) for _ in [0])
+    configurations.extend(("balanced_mixed", args.positive_pairs_per_batch) for _ in [0])
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 

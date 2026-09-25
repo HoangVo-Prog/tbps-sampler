@@ -6,6 +6,7 @@ from datasets.sampler import (
     RandomIdentityImageSampler,
     RandomIdentitySampler,
     RandomPositiveMixedSampler,
+    BalancedMixedSampler,
 )
 from datasets.sampler_ddp import RandomIdentitySampler_DDP
 from torch.utils.data.distributed import DistributedSampler
@@ -159,8 +160,19 @@ def build_dataloader(args, tranforms=None):
                 num_workers=num_workers,
                 collate_fn=collate,
             )
+        elif args.sampler == 'balanced_mixed':
+            if args.distributed:
+                raise NotImplementedError('balanced_mixed sampler is currently single-GPU only')
+            logger.info('using balanced mixed sampler: pairs=%s rarity_power=%s',
+                        args.positive_pairs_per_batch, args.rarity_power)
+            train_loader = DataLoader(
+                train_set, batch_size=args.batch_size,
+                sampler=BalancedMixedSampler(
+                    dataset.train, args.batch_size,
+                    args.positive_pairs_per_batch, args.rarity_power),
+                num_workers=num_workers, collate_fn=collate)
         else:
-            logger.error('unsupported sampler! expected identity, identity_image, mixed, or random but got {}'.format(args.sampler))
+            logger.error('unsupported sampler! expected identity, identity_image, mixed, balanced_mixed, or random but got {}'.format(args.sampler))
 
         # use test set as validate set
         ds = dataset.val if args.val_dataset == 'val' else dataset.test
