@@ -1,4 +1,5 @@
 import argparse
+from datasets.sampler_mining import add_balanced_sampler_arguments
 
 
 def get_args():
@@ -73,8 +74,7 @@ def get_args():
     parser.add_argument("--num_instance", type=int, default=4)
     parser.add_argument("--positive_pairs_per_batch", type=int, default=4,
                         help="same-PID pairs per batch when sampler=mixed")
-    parser.add_argument("--rarity_power", type=float, default=0.5,
-                        help="inverse-frequency power for balanced_mixed")
+    add_balanced_sampler_arguments(parser)
     parser.add_argument("--root_dir", default="./data")
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--test_batch_size", type=int, default=512)

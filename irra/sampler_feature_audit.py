@@ -25,6 +25,11 @@ from datasets.sampler import (
 from model import build_model
 from utils.checkpoint import Checkpointer
 from utils.iotools import load_train_configs
+from datasets.sampler_mining import (
+    NegativeNeighborIndex, add_balanced_sampler_arguments, balanced_sampler_kwargs,
+    negative_index_from_topk,
+)
+from sampler_audit import audit_batches, pid_exposure_records
 
 
 def encode_features(rows, model, args, device, batch_size, workers):
@@ -94,21 +99,26 @@ def global_topk(query, candidates, query_pids, candidate_pids, k, chunk_size, de
     return np.concatenate(all_indices), np.concatenate(all_scores)
 
 
-def sample_indices(rows, sampler_name, batch_size, k, mixed_pairs, seed):
+def sample_indices(rows, sampler_name, batch_size, k, mixed_pairs, seed,
+                   sampler_options=None, negative_index=None):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if sampler_name == "random":
-        return torch.randperm(len(rows)).tolist()
+        return torch.randperm(len(rows)).tolist(), len(rows), {}
     if sampler_name == "identity":
         sampler = RandomIdentitySampler(rows, batch_size, k)
     elif sampler_name == "identity_image":
         sampler = RandomIdentityImageSampler(rows, batch_size, k)
-    elif sampler_name == "balanced_mixed":
-        sampler = BalancedMixedSampler(rows, batch_size, mixed_pairs)
+    elif sampler_name in ("balanced_mixed", "balanced_mixed_metadata"):
+        options = dict(sampler_options or {})
+        options["seed"] = seed
+        options["negative_index"] = negative_index if sampler_name == "balanced_mixed" else None
+        sampler = BalancedMixedSampler(rows, batch_size, mixed_pairs, **options)
     else:
         sampler = RandomPositiveMixedSampler(rows, batch_size, mixed_pairs)
-    return list(iter(sampler))
+    indices = list(iter(sampler))
+    return indices, len(sampler), getattr(sampler, "diagnostics", {})
 
 
 def batch_metrics(indices, image_features, text_features, row_image_positions,
@@ -165,8 +175,8 @@ def batch_metrics(indices, image_features, text_features, row_image_positions,
         for top_k in k_values:
             width = min(top_k, neighbors.shape[1])
             hits = np.asarray([
-                len(set(row[:width].tolist()) & candidates) / width
-                for row in neighbors
+                len({i for i in row[:width].tolist() if i >= 0} & candidates)
+                / max(1, sum(i >= 0 for i in row[:width])) for row in neighbors
             ])
             result[f"{direction}_global_top{top_k}_coverage"] = float(hits.mean())
             result[f"{direction}_global_top{top_k}_hit_rate"] = float((hits > 0).mean())
@@ -192,7 +202,15 @@ def main():
     parser.add_argument("--chunk-size", type=int, default=256)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--mining-neighbors", type=int, default=64)
+    parser.add_argument("--export-mining-cache", default="",
+                        help="default: output-dir/negative_neighbors.npz")
+    add_balanced_sampler_arguments(parser)
     args = parser.parse_args()
+    if (args.batch_size <= 0 or args.feature_batch_size <= 0 or args.chunk_size <= 0
+            or not args.top_k or min(args.top_k) < 1
+            or args.mining_neighbors <= args.hard_top_k):
+        parser.error("positive batch/chunk sizes and mining-neighbors > hard-top-k required")
 
     model_run = Path(args.model_run)
     config_path = model_run / "configs.yaml" if model_run.is_dir() else model_run
@@ -223,7 +241,8 @@ def main():
     row_image_features = image_features[
         torch.as_tensor(row_image_positions, dtype=torch.long, device=device)
     ]
-    top_k = max(args.top_k)
+    top_k = max(args.top_k) if args.sampler_mining_cache else max(
+        max(args.top_k), args.mining_neighbors)
     global_neighbors = [
         global_topk(row_image_features, text_features, pids, pids, top_k,
                     args.chunk_size, device),
@@ -232,20 +251,34 @@ def main():
         global_topk(text_features, text_features, pids, pids, top_k,
                     args.chunk_size, device),
     ]
+    # Invalid masked neighbors must not become same-PID mining candidates.
+    for indices, scores in global_neighbors:
+        indices[~np.isfinite(scores)] = -1
+    negative_index = (NegativeNeighborIndex.load(args.sampler_mining_cache, rows)
+                      if args.sampler_mining_cache else negative_index_from_topk(
+                          rows, global_neighbors, row_image_positions, checkpoint_path))
 
     configurations = [("random", None)]
     configurations.extend(("identity", k) for k in args.num_instances)
     configurations.extend(("identity_image", k) for k in args.num_instances)
     configurations.extend(("mixed", args.positive_pairs_per_batch) for _ in [0])
+    configurations.append(("balanced_mixed_metadata", args.positive_pairs_per_batch))
     configurations.extend(("balanced_mixed", args.positive_pairs_per_batch) for _ in [0])
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = Path(args.export_mining_cache) if args.export_mining_cache else (
+        output_dir / "negative_neighbors.npz")
+    negative_index.save(cache_path)
+    print(f"Exported frozen negative-neighbor cache: {cache_path}")
+    composition_dir = output_dir / "composition"
+    composition_dir.mkdir(parents=True, exist_ok=True)
+    sampler_options = balanced_sampler_kwargs(args)
 
     for sampler, value in configurations:
         for seed in args.seeds:
-            indices = sample_indices(rows, sampler, args.batch_size,
-                                     value or args.num_instances[0],
-                                     args.positive_pairs_per_batch, seed)
+            indices, reported_length, diagnostics = sample_indices(
+                rows, sampler, args.batch_size, value or args.num_instances[0],
+                args.positive_pairs_per_batch, seed, sampler_options, negative_index)
             records = []
             for batch_number, start in enumerate(range(0, len(indices), args.batch_size), 1):
                 batch = indices[start:start + args.batch_size]
@@ -256,14 +289,38 @@ def main():
                 ))
             summary = {"sampler": sampler, "value": value, "seed": seed,
                        "checkpoint": str(checkpoint_path), "similarity": "cosine",
-                       "batches": len(records)}
+                       "batches": len(records), "aggregation": "anchor_weighted",
+                       "sampler_diagnostics": diagnostics,
+                       "mining_checkpoint": (negative_index.checkpoint
+                                             if diagnostics.get("mining_enabled") else None),
+                       "mining_same_checkpoint_as_evaluation": (
+                           diagnostics.get("mining_enabled", False)
+                           and negative_index.checkpoint == str(checkpoint_path))}
             for key in records[0]:
                 if key in {"sampler", "seed", "batch", "batch_size", "unique_pids"}:
                     continue
-                values = [row[key] for row in records if row[key] is not None]
-                summary[f"mean_{key}"] = float(np.mean(values)) if values else None
-                summary[f"std_{key}"] = float(np.std(values)) if values else None
+                usable = [row for row in records if row[key] is not None]
+                values = np.asarray([row[key] for row in usable])
+                weights = np.asarray([row["batch_size"] for row in usable])
+                average = float(np.average(values, weights=weights)) if len(values) else None
+                summary[f"mean_{key}"] = average
+                summary[f"std_{key}"] = (float(np.sqrt(np.average(
+                    (values - average) ** 2, weights=weights))) if len(values) else None)
             stem = f"{sampler}_{value or 'na'}_seed{seed}"
+            composition, composition_batches = audit_batches(
+                rows, indices, sampler, args.batch_size, value, seed, reported_length)
+            composition["sampler_diagnostics"] = diagnostics
+            (composition_dir / f"{stem}.json").write_text(
+                json.dumps(composition, indent=2), encoding="utf-8")
+            for suffix, composition_rows in (
+                ("batches", composition_batches),
+                ("pid_exposure", pid_exposure_records(rows, indices)),
+            ):
+                with (composition_dir / f"{stem}_{suffix}.csv").open(
+                        "w", newline="", encoding="utf-8") as handle:
+                    writer = csv.DictWriter(handle, fieldnames=composition_rows[0].keys())
+                    writer.writeheader()
+                    writer.writerows(composition_rows)
             (output_dir / f"{stem}.json").write_text(
                 json.dumps(summary, indent=2), encoding="utf-8"
             )

@@ -9,6 +9,7 @@ from datasets.sampler import (
     BalancedMixedSampler,
 )
 from datasets.sampler_ddp import RandomIdentitySampler_DDP
+from datasets.sampler_mining import NegativeNeighborIndex, balanced_sampler_kwargs
 from torch.utils.data.distributed import DistributedSampler
 
 from utils.comm import get_world_size
@@ -163,13 +164,20 @@ def build_dataloader(args, tranforms=None):
         elif args.sampler == 'balanced_mixed':
             if args.distributed:
                 raise NotImplementedError('balanced_mixed sampler is currently single-GPU only')
-            logger.info('using balanced mixed sampler: pairs=%s rarity_power=%s',
-                        args.positive_pairs_per_batch, args.rarity_power)
+            cache_path = getattr(args, 'sampler_mining_cache', '')
+            negative_index = (NegativeNeighborIndex.load(cache_path, dataset.train)
+                              if cache_path else None)
+            logger.info('balanced_mixed: pairs=%s exposure=%s mining=%s',
+                        args.positive_pairs_per_batch, getattr(args, 'sampler_exposure', 'coverage'),
+                        negative_index is not None)
+            if negative_index is None:
+                logger.warning('No mining cache supplied: hard-negative selection is disabled')
             train_loader = DataLoader(
                 train_set, batch_size=args.batch_size,
                 sampler=BalancedMixedSampler(
                     dataset.train, args.batch_size,
-                    args.positive_pairs_per_batch, args.rarity_power),
+                    args.positive_pairs_per_batch,
+                    **balanced_sampler_kwargs(args, negative_index)),
                 num_workers=num_workers, collate_fn=collate)
         else:
             logger.error('unsupported sampler! expected identity, identity_image, mixed, balanced_mixed, or random but got {}'.format(args.sampler))

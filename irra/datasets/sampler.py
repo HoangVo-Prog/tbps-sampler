@@ -3,6 +3,7 @@ from collections import defaultdict
 import copy
 import random
 import numpy as np
+from .sampler_mining import BalancedMixedIndexSampler
 
 class RandomIdentitySampler(Sampler):
     """
@@ -202,79 +203,6 @@ class RandomPositiveMixedSampler(Sampler):
         return self.num_batches * self.batch_size
 
 
-class BalancedMixedSampler(Sampler):
-    """Diverse positive pairs with inverse-frequency PID selection."""
-
-    def __init__(self, data_source, batch_size, positive_pairs_per_batch,
-                 rarity_power=0.5):
-        if batch_size % 2 or positive_pairs_per_batch < 1:
-            raise ValueError("batch_size must be even and positive_pairs_per_batch > 0")
-        if 2 * positive_pairs_per_batch >= batch_size:
-            raise ValueError("positive pairs must leave singleton slots")
-        self.batch_size = batch_size
-        self.positive_pairs_per_batch = positive_pairs_per_batch
-        self.num_singleton_pids = batch_size - 2 * positive_pairs_per_batch
-        self.rarity_power = rarity_power
-        self.pid_image_indices = defaultdict(lambda: defaultdict(list))
-        for index, (pid, image_id, _, _) in enumerate(data_source):
-            self.pid_image_indices[pid][image_id].append(index)
-        self.pids = list(self.pid_image_indices)
-        self.pair_pids = [pid for pid in self.pids
-                          if len(self.pid_image_indices[pid]) >= 2]
-        required = positive_pairs_per_batch + self.num_singleton_pids
-        if len(self.pair_pids) < positive_pairs_per_batch or len(self.pids) < required:
-            raise ValueError("dataset has too few identities for balanced_mixed")
-        self.pid_weights = {
-            pid: len(indices) ** (-rarity_power)
-            for pid, indices in self.pid_image_indices.items()
-        }
-        self.num_batches = len(data_source) // batch_size
-
-    def _weighted_sample(self, candidates, count):
-        candidates = list(candidates)
-        selected = []
-        for _ in range(count):
-            weights = np.asarray([self.pid_weights[pid] for pid in candidates], dtype=np.float64)
-            weights /= weights.sum()
-            selected.append(candidates.pop(np.random.choice(len(candidates), p=weights)))
-        return selected
-
-    def __iter__(self):
-        remaining = {pid: {image_id: list(indices) for image_id, indices
-                           in image_indices.items()}
-                      for pid, image_indices in self.pid_image_indices.items()}
-        for image_indices in remaining.values():
-            for indices in image_indices.values():
-                random.shuffle(indices)
-        active_pids = set(self.pids)
-        final_indices = []
-        for _ in range(self.num_batches):
-            active_pids = {pid for pid in active_pids if any(remaining[pid].values())}
-            pair_pool = [pid for pid in active_pids if sum(
-                bool(indices) for indices in remaining[pid].values()) >= 2]
-            if len(pair_pool) < self.positive_pairs_per_batch:
-                break
-            pair_pids = self._weighted_sample(pair_pool, self.positive_pairs_per_batch)
-            batch_indices = []
-            for pid in pair_pids:
-                available = [image_id for image_id, indices in remaining[pid].items() if indices]
-                for image_id in random.sample(available, 2):
-                    batch_indices.append(remaining[pid][image_id].pop())
-            singleton_pool = [pid for pid in active_pids if pid not in set(pair_pids)
-                              and any(remaining[pid].values())]
-            if len(singleton_pool) < self.num_singleton_pids:
-                break
-            for pid in self._weighted_sample(singleton_pool, self.num_singleton_pids):
-                available = [image_id for image_id, indices in remaining[pid].items() if indices]
-                image_id = random.choice(available)
-                batch_indices.append(remaining[pid][image_id].pop())
-            random.shuffle(batch_indices)
-            final_indices.extend(batch_indices)
-            for pid in list(active_pids):
-                if not any(remaining[pid].values()):
-                    active_pids.remove(pid)
-        return iter(final_indices)
-
-    def __len__(self):
-        return self.num_batches * self.batch_size
+class BalancedMixedSampler(BalancedMixedIndexSampler, Sampler):
+    """Torch adapter for the frozen-neighbor mixed sampler."""
 

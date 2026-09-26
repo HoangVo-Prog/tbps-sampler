@@ -54,6 +54,8 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
 
     # train
     for epoch in range(start_epoch, num_epoch + 1):
+        if hasattr(train_loader.sampler, 'set_epoch'):
+            train_loader.sampler.set_epoch(epoch - 1)
         start_time = time.time()
         for meter in meters.values():
             meter.reset()

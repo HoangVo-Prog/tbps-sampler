@@ -18,6 +18,8 @@
 
 ## Useful new CLI
 
+Balanced mixed sampler v2: [method, notebook workflow, and audit metrics](irra/BALANCED_SAMPLER.md).
+
 * `--lr-total-epochs INT`: Sets the epoch horizon used by the learning-rate scheduler independently from the actual training duration. Useful for short runs that should follow the same LR trajectory as a longer training schedule.
 
 * `--eval-after-epoch INT`: Delays validation/evaluation until the specified epoch. Useful for skipping unnecessary early evaluations while preserving the original evaluation frequency afterward.

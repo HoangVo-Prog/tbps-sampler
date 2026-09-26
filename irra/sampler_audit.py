@@ -20,6 +20,9 @@ from datasets.sampler import (
     RandomPositiveMixedSampler,
     BalancedMixedSampler,
 )
+from datasets.sampler_mining import (
+    NegativeNeighborIndex, add_balanced_sampler_arguments, balanced_sampler_kwargs,
+)
 
 
 def mean(values):
@@ -71,7 +74,8 @@ def audit_batches(rows, indices, sampler_name, batch_size, num_instances, seed,
         batch_records.append({
             "sampler": sampler_name,
             "num_instances": num_instances if sampler_name.startswith("identity") else "",
-            "positive_pairs_per_batch": num_instances if sampler_name == "mixed" else "",
+            "positive_pairs_per_batch": num_instances if sampler_name in (
+                "mixed", "balanced_mixed", "balanced_mixed_metadata") else "",
             "seed": seed,
             "batch": batch_number,
             "batch_size": len(batch_indices),
@@ -100,7 +104,8 @@ def audit_batches(rows, indices, sampler_name, batch_size, num_instances, seed,
     summary = {
         "sampler": sampler_name,
         "num_instances": num_instances if sampler_name.startswith("identity") else None,
-        "positive_pairs_per_batch": num_instances if sampler_name == "mixed" else None,
+        "positive_pairs_per_batch": num_instances if sampler_name in (
+            "mixed", "balanced_mixed", "balanced_mixed_metadata") else None,
         "seed": seed,
         "source_samples": len(rows),
         "source_pids": len(source_counts),
@@ -114,6 +119,15 @@ def audit_batches(rows, indices, sampler_name, batch_size, num_instances, seed,
         "rows_not_yielded": len(rows) - len(exposure),
         "duplicate_row_draws": sum(max(0, count - 1) for count in exposure.values()),
         "batches": len(batch_records),
+        "partial_batches": sum(r["batch_size"] < batch_size for r in batch_records),
+        "anchor_weighted_positive_fraction": (
+            sum(r["anchors_with_positive"] for r in batch_records) / actual_length
+            if actual_length else 0.0
+        ),
+        "pooled_same_image_positive_fraction": (
+            sum(r["same_image_positive_pairs"] for r in batch_records)
+            / max(1, sum(r["positive_pid_pairs"] for r in batch_records))
+        ),
         "batches_without_positive_pairs": sum(
             record["positive_pid_pairs"] == 0 for record in batch_records
         ),
@@ -144,6 +158,14 @@ def audit_batches(rows, indices, sampler_name, batch_size, num_instances, seed,
     return summary, batch_records
 
 
+def pid_exposure_records(rows, indices):
+    source = Counter(row[0] for row in rows)
+    exposures = Counter(rows[index][0] for index in indices)
+    return [{"pid": pid, "source_rows": count, "draws": exposures[pid],
+             "draws_per_source_row": exposures[pid] / count}
+            for pid, count in sorted(source.items())]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root-dir", required=True,
@@ -155,6 +177,7 @@ def main():
     parser.add_argument("--positive-pairs-per-batch", type=int, default=4)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--output-dir", default="results/sampler_audit")
+    add_balanced_sampler_arguments(parser)
     args = parser.parse_args()
 
     if args.batch_size <= 0:
@@ -174,12 +197,16 @@ def main():
 
     summaries = []
     batch_rows = []
+    pid_rows = []
+    negative_index = (NegativeNeighborIndex.load(args.sampler_mining_cache, rows)
+                      if args.sampler_mining_cache else None)
     configs = [("random", None)]
     configs.extend(("identity", k) for k in args.num_instances)
     configs.extend(("identity_image", k) for k in args.num_instances)
     configs.append(("mixed", args.positive_pairs_per_batch))
     configs.append(("balanced_mixed", args.positive_pairs_per_batch))
     for sampler_name, num_instances in configs:
+        diagnostics = None
         if sampler_name == "identity_image":
             random.seed(args.seed)
             sampler = RandomIdentityImageSampler(rows, args.batch_size, num_instances)
@@ -194,9 +221,11 @@ def main():
             random.seed(args.seed)
             np.random.seed(args.seed)
             sampler = BalancedMixedSampler(
-                rows, args.batch_size, args.positive_pairs_per_batch
+                rows, args.batch_size, args.positive_pairs_per_batch,
+                **balanced_sampler_kwargs(args, negative_index)
             )
             indices, reported_length = list(iter(sampler)), len(sampler)
+            diagnostics = sampler.diagnostics
         else:
             indices, reported_length = make_indices(
                 rows, sampler_name, args.batch_size, num_instances, args.seed
@@ -206,6 +235,11 @@ def main():
             args.seed, reported_length
         )
         summaries.append(summary)
+        if diagnostics is not None:
+            summary["sampler_diagnostics"] = diagnostics
+        for record in pid_exposure_records(rows, indices):
+            pid_rows.append(dict(sampler=sampler_name, num_instances=num_instances,
+                                 seed=args.seed, **record))
         batch_rows.extend(per_batch)
 
     suffix = (
@@ -218,6 +252,11 @@ def main():
         writer = csv.DictWriter(handle, fieldnames=batch_rows[0].keys())
         writer.writeheader()
         writer.writerows(batch_rows)
+    with (output_dir / f"pid_exposure_{suffix}.csv").open(
+            "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=pid_rows[0].keys())
+        writer.writeheader()
+        writer.writerows(pid_rows)
 
     for summary in summaries:
         print(json.dumps(summary, ensure_ascii=False))
