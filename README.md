@@ -22,6 +22,3 @@
 
 * `--eval-after-epoch INT`: Delays validation/evaluation until the specified epoch. Useful for skipping unnecessary early evaluations while preserving the original evaluation frequency afterward.
 
-## Make file
-
-
